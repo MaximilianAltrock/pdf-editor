@@ -33,7 +33,10 @@ class DocumentCache:
         Returns:
             The cached Pixmap if available, otherwise None
         """
+        # Round zoom to 2 decimal places to prevent nearly identical cache entries
+        zoom = round(zoom, 2)
         cache_key = (page.number, zoom)
+        
         with self._cache_lock:
             if cache_key in self._page_cache:
                 # Move to end to mark as recently used
@@ -50,11 +53,19 @@ class DocumentCache:
             image: The page image to cache
             zoom: The zoom factor for the page image
         """
+        # Round zoom to 2 decimal places to prevent nearly identical cache entries
+        zoom = round(zoom, 2)
         cache_key = (page.number, zoom)
+        
         with self._cache_lock:
+            # If already in cache, don't add again
+            if cache_key in self._page_cache:
+                return
+                
             # If cache is full, remove oldest item
             if len(self._page_cache) >= self.max_size:
                 self._page_cache.popitem(last=False)
+            
             self._page_cache[cache_key] = image
             
     def clear(self) -> None:

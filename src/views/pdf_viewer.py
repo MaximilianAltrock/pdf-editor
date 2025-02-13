@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (
     QSizePolicy
 )
 from PySide6.QtGui import QPixmap, QImage, QWheelEvent
-from PySide6.QtCore import Qt, Signal, QSize, QPoint
+from PySide6.QtCore import Qt, Signal, QSize, QPoint, QEvent
 
 class PDFPageLabel(QLabel):
     """Label for displaying a single PDF page."""
@@ -11,6 +11,7 @@ class PDFPageLabel(QLabel):
     def __init__(self, page_number: int, parent=None):
         super().__init__(parent)
         self.page_number = page_number
+        self.original_pixmap = None  # Store original unscaled pixmap
         self.setAlignment(Qt.AlignCenter)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
@@ -28,6 +29,9 @@ class PDFViewerWidget(QWidget):
         self.zoom_level = 1.0
         self.page_labels = []  # List of PDFPageLabel widgets
         self.setup_ui()
+        
+        # Enable touch gestures
+        self.grabGesture(Qt.PinchGesture)
         
     def setup_ui(self):
         """Initialize the UI components."""
@@ -75,13 +79,54 @@ class PDFViewerWidget(QWidget):
         self.scroll_area.verticalScrollBar().valueChanged.connect(
             self._on_scroll_changed
         )
+        
+        # Install event filter on scroll area and viewport
+        self.scroll_area.viewport().installEventFilter(self)
+        self.scroll_area.installEventFilter(self)
+    
+    def event(self, event):
+        """Handle various events including gestures.
+        
+        Args:
+            event: The event to handle
+            
+        Returns:
+            bool: True if event was handled
+        """
+        if event.type() == QEvent.Type.Gesture:
+            return self.handle_gesture_event(event)
+        return super().event(event)
+    
+    def handle_gesture_event(self, event):
+        """Handle gesture events like pinch zoom.
+        
+        Args:
+            event: The gesture event
+            
+        Returns:
+            bool: True if event was handled
+        """
+        if gesture := event.gesture(Qt.PinchGesture):
+            # Calculate center point for zooming
+            center = self.scroll_area.viewport().mapFromGlobal(
+                gesture.centerPoint().toPoint()
+            )
+            
+            # Get scale change since last update
+            scale_factor = gesture.scaleFactor()
+            # Emit zoom changed signal for controller to handle
+            self.zoomChanged.emit(self.zoom_level * scale_factor)
+            
+            return True
+        return False
     
     def wheelEvent(self, event: QWheelEvent):
-        """Handle mouse wheel events for zooming and scrolling.
+        """Handle mouse wheel events for scrolling.
         
         Args:
             event: The wheel event
         """
+        # Handle zoom with Ctrl+scroll on mouse (not trackpad)
         if event.modifiers() & Qt.ControlModifier:
             # Get the position before zoom for maintaining focus
             pos = self.scroll_area.widget().mapFrom(self, event.position().toPoint())
@@ -90,42 +135,21 @@ class PDFViewerWidget(QWidget):
             delta = event.angleDelta().y() / 120.0  # Number of 15-degree steps
             factor = 1.0 + (delta * 0.1)  # 10% change per step
             
-            # Apply zoom centered on mouse position
-            self.set_zoom(self.zoom_level * factor, pos)
-            event.accept()
-        else:
-            # Pass the event to the scroll area for normal scrolling
-            event.ignore()
-    
-    def set_zoom(self, zoom_level: float, center: QPoint = None):
-        """Set the zoom level, optionally maintaining focus on a point.
-        
-        Args:
-            zoom_level: New zoom level (1.0 = 100%)
-            center: Optional point to maintain focus on while zooming
-        """
-        # Store scroll position ratios before zoom
-        if center:
-            rel_x = center.x() / self.container.width()
-            rel_y = center.y() / self.container.height()
-        
-        # Apply zoom limits
-        old_zoom = self.zoom_level
-        self.zoom_level = max(0.1, min(5.0, zoom_level))
-        
-        # Only update if zoom actually changed
-        if self.zoom_level != old_zoom:
-            self._update_all_pages()
-            self.zoomChanged.emit(self.zoom_level)
+            # Emit zoom changed signal for controller to handle
+            self.zoomChanged.emit(self.zoom_level * factor)
             
-            # Restore focus point after zoom
-            if center:
-                self.scroll_area.horizontalScrollBar().setValue(
-                    int(rel_x * self.container.width() - center.x())
-                )
-                self.scroll_area.verticalScrollBar().setValue(
-                    int(rel_y * self.container.height() - center.y())
-                )
+            # Prevent scrolling while zooming
+            event.accept()
+            return
+            
+        # For non-zoom scrolling, forward to the scroll area
+        self.scroll_area.wheelEvent(event)
+    
+    def set_zoom(self, zoom_level: float):
+        """Set zoom level and update page display."""
+        if zoom_level != self.zoom_level:
+            self.zoom_level = zoom_level
+            self._update_all_pages()
     
     def zoom_in(self):
         """Increase zoom level by 10%."""
@@ -133,7 +157,7 @@ class PDFViewerWidget(QWidget):
             self.scroll_area.viewport().width() // 2,
             self.scroll_area.viewport().height() // 2
         )
-        self.set_zoom(self.zoom_level * 1.1, center)
+        self.set_zoom(min(5.0, self.zoom_level * 1.1), center)
     
     def zoom_out(self):
         """Decrease zoom level by 10%."""
@@ -141,7 +165,7 @@ class PDFViewerWidget(QWidget):
             self.scroll_area.viewport().width() // 2,
             self.scroll_area.viewport().height() // 2
         )
-        self.set_zoom(self.zoom_level / 1.1, center)
+        self.set_zoom(max(0.1, self.zoom_level / 1.1), center)
         
     def reset_zoom(self):
         """Reset zoom level to 100%."""
@@ -159,7 +183,7 @@ class PDFViewerWidget(QWidget):
         viewport_rect.translate(0, self.scroll_area.verticalScrollBar().value())
         
         max_visible_area = 0
-        most_visible_page = 0
+        most_visible_page = self.current_page
         
         for label in self.page_labels:
             page_rect = label.geometry()
@@ -185,7 +209,21 @@ class PDFViewerWidget(QWidget):
         """
         if 0 <= page_number < len(self.page_labels):
             label = self.page_labels[page_number]
-            self.scroll_area.ensureWidgetVisible(label, 50, 50)
+            
+            # Calculate the target scroll position to center the page
+            viewport_height = self.scroll_area.viewport().height()
+            page_height = label.height()
+            y_offset = label.pos().y()
+            
+            # Center the page vertically
+            target_y = y_offset - (viewport_height - page_height) // 2
+            
+            # Ensure we don't scroll beyond bounds
+            target_y = max(0, min(target_y, self.container.height() - viewport_height))
+            
+            # Scroll to the calculated position
+            self.scroll_area.verticalScrollBar().setValue(target_y)
+            
             self.current_page = page_number
             self.pageChanged.emit(page_number)
             return True
@@ -200,13 +238,15 @@ class PDFViewerWidget(QWidget):
         self.clear()
         self.total_pages = total_pages
         self.current_page = 0
-        self.pageChanged.emit(0)  # Emit signal for initial page
         
         # Create labels for all pages
         for i in range(total_pages):
             label = PDFPageLabel(i)
             self.page_labels.append(label)
             self.container_layout.addWidget(label)
+        
+        # Emit signal for initial page and update UI
+        self.pageChanged.emit(0)  # This will trigger page loading in MainWindow
     
     def display_page(self, page_number: int, image_or_pixmap):
         """Display a page.
@@ -224,7 +264,10 @@ class PDFViewerWidget(QWidget):
             pixmap = image_or_pixmap
         
         if pixmap:
-            # Scale pixmap
+            # Store original pixmap
+            self.page_labels[page_number].original_pixmap = pixmap
+            
+            # Scale pixmap using current zoom
             scaled_pixmap = pixmap.scaled(
                 int(pixmap.width() * self.zoom_level),
                 int(pixmap.height() * self.zoom_level),
@@ -238,18 +281,21 @@ class PDFViewerWidget(QWidget):
     def _update_all_pages(self):
         """Update all page displays with current zoom level."""
         for label in self.page_labels:
-            if pixmap := label.pixmap():
-                # Get original size pixmap
-                orig_size = pixmap.size() / (self.zoom_level / 1.1)  # Approximate
+            if original := label.original_pixmap:
+                # Scale from original pixmap to maintain quality
+                new_width = int(original.width() * self.zoom_level)
+                new_height = int(original.height() * self.zoom_level)
                 
-                # Scale to new zoom level
-                scaled_pixmap = pixmap.scaled(
-                    int(orig_size.width() * self.zoom_level),
-                    int(orig_size.height() * self.zoom_level),
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation
-                )
-                label.setPixmap(scaled_pixmap)
+                # Only rescale if dimensions actually changed
+                current = label.pixmap()
+                if not current or current.width() != new_width or current.height() != new_height:
+                    scaled_pixmap = original.scaled(
+                        new_width,
+                        new_height,
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation
+                    )
+                    label.setPixmap(scaled_pixmap)
     
     def clear(self):
         """Clear all pages."""
@@ -263,3 +309,22 @@ class PDFViewerWidget(QWidget):
     def sizeHint(self) -> QSize:
         """Suggest a size for the widget."""
         return QSize(800, 1000)  # Default size suitable for most PDF pages
+    
+    def eventFilter(self, obj, event):
+        """Filter events to intercept wheel events before they reach the scroll area.
+        
+        Args:
+            obj: The object the event was sent to
+            event: The event
+            
+        Returns:
+            bool: True if the event should be filtered out
+        """
+        if (isinstance(event, QWheelEvent) and 
+            event.modifiers() & Qt.ControlModifier):
+            # Emit zoom changed signal for controller to handle
+            delta = event.angleDelta().y() / 120.0
+            factor = 1.0 + (delta * 0.1)
+            self.zoomChanged.emit(self.zoom_level * factor)
+            return True  # Prevent event from being processed further
+        return super().eventFilter(obj, event)

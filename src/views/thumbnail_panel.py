@@ -87,6 +87,10 @@ class PDFThumbnailPanel(QWidget):
             pixmap: The page image
             page_number: The page number (0-based)
         """
+        # Check if page already exists
+        if page_number < self.list_widget.count():
+            return  # Skip if thumbnail for this page already exists
+            
         # Create thumbnail
         scaled = pixmap.scaled(
             120, 160,
