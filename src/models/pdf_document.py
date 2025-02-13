@@ -1,12 +1,11 @@
 import fitz  # PyMuPDF
+from .document_cache import DocumentCache
 from typing import List, Tuple, Union, Optional, Callable
 from functools import wraps
 from .pdf_errors import (
     PDFError,
     PDFDocumentError,
-    PDFPageError,
-    PDFImageError,
-    PDFTextError
+    PDFPageError
 )
 
 def require_document(f: Callable):
@@ -34,6 +33,7 @@ class PDFDocument:
     def __init__(self, filepath: str = None):
         self.filepath = filepath
         self.doc: fitz.Document = None
+        self._cache = DocumentCache()
         if filepath:
             self.load(filepath)
 
@@ -49,6 +49,7 @@ class PDFDocument:
         """
         try:
             self.doc = fitz.open(filepath)
+            self._cache.clear()  # Clear cache on new document load
             self.filepath = filepath
         except Exception as e:
             raise PDFDocumentError(f"Failed to open PDF document: {str(e)}")
@@ -71,11 +72,31 @@ class PDFDocument:
 
         Raises:
             PDFDocumentError: If the document is not loaded.
+            PDFError: If the save operation fails.
         """
-        if self.doc:
-            self.doc.save(filepath, garbage=garbage, deflate=deflate, clean=clean)
-        else:
+        if not self.doc:
             raise PDFDocumentError("Cannot save: No document loaded.")
+        
+        try:
+            # If saving to the original file, we must use incremental save
+            if filepath == self.filepath:
+                self.doc.save(
+                    filepath,
+                    incremental=True,
+                    encryption=self.doc.is_encrypted
+                )
+            else:
+                # When saving to a new file, we can use the optimization parameters
+                self.doc.save(
+                    filepath,
+                    garbage=garbage,
+                    deflate=deflate,
+                    clean=clean,
+                    incremental=False,
+                    encryption=self.doc.is_encrypted
+                )
+        except Exception as e:
+            raise PDFError(f"Failed to save PDF: {str(e)}")
 
     def close(self) -> None:
         """
@@ -84,6 +105,7 @@ class PDFDocument:
         if self.doc:
             self.doc.close()
             self.doc = None
+            self._cache.clear()  # Clear cache when closing
             self.filepath = None
             
     def __enter__(self):
@@ -152,6 +174,7 @@ class PDFDocument:
         """
         if 0 <= page_number < self.doc.page_count:
             self.doc.delete_page(page_number)
+            self._cache.remove_page(page_number)  # Remove from cache
         else:
             raise PDFPageError("Page number out of range.")
 
@@ -170,6 +193,8 @@ class PDFDocument:
         """
         if 0 <= from_page <= to_page < self.doc.page_count:
             self.doc.delete_pages(from_page=from_page, to_page=to_page)
+            for page_num in range(from_page, to_page + 1):
+                self._cache.remove_page(page_num)  # Remove from cache
         else:
             raise PDFPageError("Page numbers out of range.")
     
@@ -188,6 +213,9 @@ class PDFDocument:
         """
         if 0 <= from_page < self.doc.page_count and 0 <= to_page < self.doc.page_count:
             self.doc.move_page(from_page, to_page)
+            # Clear affected pages from cache
+            self._cache.remove_page(from_page)
+            self._cache.remove_page(to_page)
         else:
             raise PDFPageError("Page number out of range.")
     
@@ -207,6 +235,8 @@ class PDFDocument:
         """
         if 0 <= page_number < self.doc.page_count:
             self.doc.copy_page(page_number, to_page)
+            # Clear cache as page numbers may have shifted
+            self._cache.clear()
         else:
             raise PDFPageError("Page number out of range.")
 
@@ -225,6 +255,7 @@ class PDFDocument:
         """
         if all(0 <= p < self.doc.page_count for p in page_list):
             self.doc.select(page_list)
+            self._cache.clear()  # Clear cache as page order changed
         else:
             raise PDFPageError("Invalid page number(s) in selection list.")
 
@@ -245,7 +276,10 @@ class PDFDocument:
         Raises:
             PDFDocumentError: If no document is loaded.
         """
-        return self.doc.new_page(pno=pno, width=width, height=height)
+        page = self.doc.new_page(pno=pno, width=width, height=height)
+        if page and pno >= 0:
+            self._cache.remove_page(pno)  # Clear cache for affected position
+        return page
 
     @require_document
     def get_page_image(self, page_number: int, zoom: float = 1.0) -> Optional[fitz.Pixmap]:
@@ -265,8 +299,17 @@ class PDFDocument:
         """
         if 0 <= page_number < self.doc.page_count:
             page = self.doc.load_page(page_number)
+            
+            # Check cache first
+            cached_image = self._cache.get_page_image(page, zoom)
+            if cached_image:
+                return cached_image
+            
+            # Generate and cache if not found
             matrix = fitz.Matrix(zoom, zoom)
-            return page.get_pixmap(matrix=matrix)
+            pixmap = page.get_pixmap(matrix=matrix)
+            self._cache.add_page_image(page, pixmap, zoom)
+            return pixmap
         return None
     
     @require_document
