@@ -183,7 +183,7 @@ class MainWindow(QMainWindow):
     
     def load_page_range(self, start: int, end: int):
         """Load a range of pages.
-        
+
         Args:
             start: Start page number (inclusive)
             end: End page number (exclusive)
@@ -200,18 +200,16 @@ class MainWindow(QMainWindow):
                         pixmap.stride,
                         QImage.Format_RGB888
                     )
-                    # Add to viewer and thumbnails
+                    # Add to viewer
                     self.pdf_viewer.display_page(page, img)
-                    if page == 0:  # Only first page gets added immediately
-                        self.thumbnail_panel.add_thumbnail(QPixmap.fromImage(img), page)
                     self.loaded_pages.add(page)
     
     def open_document(self, filepath: str) -> bool:
         """Open a PDF document.
-        
+
         Args:
             filepath: Path to the PDF file
-            
+
         Returns:
             bool: True if document was opened successfully
         """
@@ -219,44 +217,50 @@ class MainWindow(QMainWindow):
             # Close any existing document
             if self.pdf_document:
                 self.pdf_document.close()
-            
+
             # Create and load new document
             self.pdf_document = PDFDocument(filepath)
-            
+
+            if self.pdf_document is None:
+                return False
+
             # Clear loaded pages tracking
             self.loaded_pages.clear()
-            
+
             # Update UI
             self.toolbar.update_actions(True)
             self.menu_bar.update_actions(True)
-            
+
             # Set document in viewer
             self.pdf_viewer.set_document(self.pdf_document.page_count)
-            
+
             # Clear and reset thumbnail panel
             self.thumbnail_panel.clear()
-            
-            # Load initial pages
+
             self.load_page_range(0, min(3, self.pdf_document.page_count))
-            
+
             # Load remaining thumbnails in background
-            for page in range(self.pdf_document.page_count):
-                if page > 0:  # Skip first page, already added
-                    pixmap = self.pdf_document.get_page_image(page, zoom=0.2)  # Small size for thumbnails
-                    if pixmap:
-                        img = QImage(
-                            pixmap.samples,
-                            pixmap.width,
-                            pixmap.height,
-                            pixmap.stride,
-                            QImage.Format_RGB888
-                        )
-                        self.thumbnail_panel.add_thumbnail(QPixmap.fromImage(img), page)
-            
+            for page in range(0, self.pdf_document.page_count):  # Start from 0 to include all pages
+                pixmap = self.pdf_document.get_page_image(page, zoom=0.2)  # Small size for thumbnails
+                if pixmap:
+                    img = QImage(
+                        pixmap.samples,
+                        pixmap.width,
+                        pixmap.height,
+                        pixmap.stride,
+                        QImage.Format_RGB888
+                    )
+                    self.thumbnail_panel.add_thumbnail(QPixmap.fromImage(img), page)
+
             # Add to recent files
             self.menu_bar.add_recent_file(filepath)
-            
+
             return True
+
+        except PDFError as e:
+            QMessageBox.critical(self, "Error", f"Failed to open PDF: {str(e)}")
+            self.pdf_document = None
+            return False
             
         except PDFError as e:
             QMessageBox.critical(self, "Error", f"Failed to open PDF: {str(e)}")

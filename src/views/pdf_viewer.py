@@ -135,8 +135,12 @@ class PDFViewerWidget(QWidget):
             delta = event.angleDelta().y() / 120.0  # Number of 15-degree steps
             factor = 1.0 + (delta * 0.1)  # 10% change per step
             
+            # Calculate and set new zoom level
+            new_zoom = self.zoom_level * factor
+            self.set_zoom(new_zoom, pos)
+            
             # Emit zoom changed signal for controller to handle
-            self.zoomChanged.emit(self.zoom_level * factor)
+            self.zoomChanged.emit(self.zoom_level)
             
             # Prevent scrolling while zooming
             event.accept()
@@ -145,8 +149,11 @@ class PDFViewerWidget(QWidget):
         # For non-zoom scrolling, forward to the scroll area
         self.scroll_area.wheelEvent(event)
     
-    def set_zoom(self, zoom_level: float):
-        """Set zoom level and update page display."""
+    def set_zoom(self, zoom_level: float, center=None):
+        """Set zoom level and update page display.
+        Args:
+            zoom_level: New zoom level to set (will be clamped between 0.1 and 5.0)"""
+        zoom_level = max(0.1, min(5.0, zoom_level))  # Enforce zoom limits
         if zoom_level != self.zoom_level:
             self.zoom_level = zoom_level
             self._update_all_pages()
@@ -325,6 +332,10 @@ class PDFViewerWidget(QWidget):
             # Emit zoom changed signal for controller to handle
             delta = event.angleDelta().y() / 120.0
             factor = 1.0 + (delta * 0.1)
-            self.zoomChanged.emit(self.zoom_level * factor)
+            
+            # Calculate and set new zoom level
+            new_zoom = self.zoom_level * factor
+            self.set_zoom(new_zoom)
+            self.zoomChanged.emit(self.zoom_level)
             return True  # Prevent event from being processed further
         return super().eventFilter(obj, event)
