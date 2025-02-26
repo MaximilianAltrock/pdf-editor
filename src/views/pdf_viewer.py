@@ -114,8 +114,15 @@ class PDFViewerWidget(QWidget):
             
             # Get scale change since last update
             scale_factor = gesture.scaleFactor()
+            
+            # Calculate new zoom level
+            new_zoom = self.zoom_level * scale_factor
+            
+            # Apply zoom with the center point
+            self.set_zoom(new_zoom, center)
+            
             # Emit zoom changed signal for controller to handle
-            self.zoomChanged.emit(self.zoom_level * scale_factor)
+            self.zoomChanged.emit(self.zoom_level)
             
             return True
         return False
